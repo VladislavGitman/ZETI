@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>ZETI — Ведение</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:ital,wght@0,600;0,700;1,700;1,800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --black:#0B0B0A; --black-2:#161614; --black-3:#1E1E1B;
+    --ivory:#EDE8DE; --ivory-dim:#55504A;
+    --red:#B31217; --red-dim:#6E0C0F; --red-soft:rgba(179,18,23,0.18);
+    --grey:#8A857C; --line:rgba(237,232,222,0.13); --cut:14px;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0; padding:0; height:100%; background:var(--black); color:var(--ivory);
+    font-family:'Inter',system-ui,sans-serif; font-size:15px; -webkit-font-smoothing:antialiased; overflow-x:hidden;}
+  #app{max-width:480px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; position:relative; z-index:1;}
+
+  /* ---- splash intro ---- */
+  #splash{position:fixed; inset:0; background:var(--black); z-index:999; display:flex; align-items:center;
+    justify-content:center; flex-direction:column; overflow:hidden;}
+  #splash::before{content:''; position:absolute; top:0; bottom:0; width:45%;
+    background:linear-gradient(100deg, transparent, rgba(179,18,23,0.35), transparent);
+    transform:translateX(-160%); animation:sweep 1.3s ease forwards .15s;}
+  @keyframes sweep{ to{transform:translateX(260%);} }
+  #splash img{height:88px; opacity:0; animation:splashIn .9s cubic-bezier(.2,.8,.2,1) forwards .1s; position:relative; z-index:1;}
+  #splash .tag{font-family:'Barlow Condensed'; font-style:italic; font-weight:700; font-size:13px;
+    letter-spacing:1.5px; color:var(--red); margin-top:16px; opacity:0;
+    animation:splashIn .7s ease forwards .55s; position:relative; z-index:1;}
+  @keyframes splashIn{ from{opacity:0; transform:translateY(16px) scale(.94);} to{opacity:1; transform:translateY(0) scale(1);} }
+  #splash.hide{animation:splashOut .5s ease forwards;}
+  @keyframes splashOut{ to{opacity:0; visibility:hidden;} }
