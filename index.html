@@ -616,6 +616,8 @@ function showCloudError(error){
     setCloudStatus('Адрес сайта ещё не добавлен в разрешённые домены Firebase.', 'error');
   }else if(code === 'auth/popup-closed-by-user'){
     setCloudStatus('Окно Google закрыто до завершения входа.', 'error');
+  }else if(code === 'auth/popup-blocked' || code === 'auth/web-storage-unsupported' || code === 'auth/operation-not-supported-in-this-environment'){
+    setCloudStatus('Браузер не открыл окно Google. Откройте сайт напрямую в Chrome или Safari и попробуйте ещё раз.', 'error');
   }else{
     setCloudStatus('Не удалось синхронизировать данные. Проверьте интернет и повторите попытку.', 'error');
   }
@@ -708,13 +710,24 @@ async function initializeFirebaseSync(){
     const firebaseApp = appSdk.initializeApp(firebaseConfig);
     firebaseAuth = authSdk.getAuth(firebaseApp);
     firebaseDb = firestoreSdk.getFirestore(firebaseApp);
+    let redirectError = null;
+    try{
+      await authSdk.getRedirectResult(firebaseAuth);
+    }catch(error){
+      redirectError = error;
+    }
     authSdk.onAuthStateChanged(firebaseAuth, async user=>{
       const generation = ++authGeneration;
       if(cloudUnsubscribe){ cloudUnsubscribe(); cloudUnsubscribe = null; }
       firebaseUser = user || null;
       cloudReady = false;
       if(!firebaseUser){
-        setCloudStatus('Войдите через Google, чтобы включить синхронизацию. Записи останутся в этом браузере.');
+        if(redirectError){
+          showCloudError(redirectError);
+          redirectError = null;
+        }else{
+          setCloudStatus('Войдите через Google, чтобы включить синхронизацию. Записи останутся в этом браузере.');
+        }
         cloudReady = true;
         rerenderTracker();
       }else{
@@ -732,8 +745,8 @@ document.getElementById('cloud-sign-in').addEventListener('click', async ()=>{
   try{
     if(!firebaseAuth) throw new Error('Firebase SDK is not available');
     const provider = new authSdk.GoogleAuthProvider();
-    if(/android|iphone|ipad|mobile/i.test(navigator.userAgent)) await authSdk.signInWithRedirect(firebaseAuth, provider);
-    else await authSdk.signInWithPopup(firebaseAuth, provider);
+    setCloudStatus('Открываю окно входа Google…');
+    await authSdk.signInWithPopup(firebaseAuth, provider);
   }catch(error){ showCloudError(error); }
 });
 document.getElementById('cloud-sign-out').addEventListener('click', ()=>{
