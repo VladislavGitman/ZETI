@@ -113,7 +113,12 @@
 
   .ai-note{font-size:12.5px; color:var(--grey); line-height:1.55; margin-bottom:16px; padding:14px; border:1px solid var(--line);}
   .ai-output{margin-top:16px; padding:16px 0 0; border-top:1px solid var(--line); font-size:14.5px; line-height:1.6; white-space:pre-wrap;}
-  .ai-output.loading{color:var(--grey); font-style:italic;}
+   .ai-output.loading{color:var(--grey); font-style:italic;}
+  .ai-history{display:flex;flex-direction:column;gap:10px;margin-top:10px;}
+  .ai-history-entry{padding:12px;background:var(--black-3);border-left:2px solid var(--red);}
+  .ai-history-question{font-size:13px;font-weight:600;white-space:pre-wrap;}
+  .ai-history-answer{font-size:13px;line-height:1.5;color:var(--ivory-dim,#c9c4ba);white-space:pre-wrap;margin-top:7px;}
+  .ai-history-date{font-size:11px;color:var(--grey);margin-top:7px;}
   .ai-account{display:flex; flex-direction:column; gap:10px; margin:14px 0 18px; padding:14px; border:1px solid var(--line); background:var(--black-2);}
   .ai-account-row{display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;}
   .ai-account-status{font-size:12.5px; color:var(--grey); line-height:1.45;}
@@ -510,6 +515,7 @@ document.getElementById('ai-ask').addEventListener('click', async ()=>{
       question
     );
     out.className='ai-output'; out.textContent=answer;
+    await saveAIHistory(question,answer); document.getElementById('ai-question').value='';
   }catch(error){ out.className='ai-output'; out.textContent=error.message || 'Ошибка запроса.'; }
 });
 
@@ -558,6 +564,8 @@ const TRACKER_KEYS = [
   'zeti:custom-recipes', 'zeti:program', 'zeti:supplements', 'zeti:supplement-log'
 ];
 const CLOUD_MIGRATION_OWNER_KEY = 'zeti:cloud-migration-owner';
+const AI_HISTORY_KEY='zeti:ai-history', AI_HISTORY_LIMIT=30;
+let aiHistoryUnsubscribe=null, aiHistoryGeneration=0, aiHistory=[];
 let firebaseUser = null;
 let cloudReady = false;
 let cloudUnsubscribe = null;
@@ -566,6 +574,36 @@ let initialAuthResolved = false;
 let authGeneration = 0;
 const initialAuthReady = new Promise(resolve => { resolveInitialAuth = resolve; });
 function cloudCacheKey(uid, key){ return 'zeti:cloud-cache:' + uid + ':' + key; }
+function cloudDirtyKey(uid,key){return 'zeti:cloud-dirty:'+uid+':'+key;}
+function aiHistoryCacheKey(uid){return 'zeti:ai-history:'+uid;}
+function aiHistoryRef(uid){return firestoreSdk.doc(firebaseDb,'users',uid,'data','ai-history');}
+function readAIHistory(uid=null){const a=readJSON(lsGet(uid?aiHistoryCacheKey(uid):AI_HISTORY_KEY),[]);return Array.isArray(a)?a.filter(x=>x&&typeof x.question==='string'&&typeof x.answer==='string').slice(0,AI_HISTORY_LIMIT):[];}
+function writeAIHistory(a,uid=null){lsSet(uid?aiHistoryCacheKey(uid):AI_HISTORY_KEY,JSON.stringify(a.slice(0,AI_HISTORY_LIMIT)));}
+function renderAIHistory(){
+ const list=document.getElementById('ai-history'),status=document.getElementById('ai-history-status');if(!list||!status)return;
+ list.replaceChildren();if(!aiHistory.length){status.textContent='История появится после первого ответа ИИ.';return;}
+ status.textContent='Последние вопросы и ответы ('+aiHistory.length+').';
+ for(const entry of aiHistory){const card=document.createElement('article');card.className='ai-history-entry';
+ const q=document.createElement('div');q.className='ai-history-question';q.textContent='Вы: '+entry.question;
+ const a=document.createElement('div');a.className='ai-history-answer';a.textContent='ИИ: '+entry.answer;
+ const d=document.createElement('div');d.className='ai-history-date';const dt=new Date(entry.createdAt);d.textContent=Number.isNaN(dt.getTime())?'':dt.toLocaleString('ru-RU');
+ card.append(q,a,d);list.appendChild(card);}
+}
+function receiveAIHistory(entries,uid=null){const a=Array.isArray(entries)?entries.filter(x=>x&&typeof x.question==='string'&&typeof x.answer==='string').slice(0,AI_HISTORY_LIMIT):[];aiHistory=a;writeAIHistory(a,uid);renderAIHistory();}
+async function saveAIHistory(question,answer){
+ const uid=firebaseUser?.uid||null,entry={question:String(question).slice(0,2000),answer:String(answer).slice(0,12000),createdAt:new Date().toISOString()};
+ const entries=[entry,...(uid?readAIHistory(uid):aiHistory)].slice(0,AI_HISTORY_LIMIT);aiHistory=entries;writeAIHistory(entries,uid);renderAIHistory();
+ if(uid&&firestoreSdk&&firebaseDb)try{await firestoreSdk.setDoc(aiHistoryRef(uid),{entries,updatedAt:firestoreSdk.serverTimestamp()});}
+ catch(error){const st=document.getElementById('ai-history-status');if(st)st.textContent='Ответ сохранён на этом устройстве; синхронизация истории не удалась. Проверьте интернет.';}
+}
+function loadAIHistoryForUser(uid,generation){
+ if(aiHistoryUnsubscribe){aiHistoryUnsubscribe();aiHistoryUnsubscribe=null;}aiHistoryGeneration=generation;
+ aiHistory=readAIHistory(uid);renderAIHistory();
+ aiHistoryUnsubscribe=firestoreSdk.onSnapshot(aiHistoryRef(uid),snap=>{
+  if(generation!==aiHistoryGeneration||firebaseUser?.uid!==uid)return;
+  if(snap.exists())receiveAIHistory(snap.data().entries,uid);else{aiHistory=readAIHistory(uid);renderAIHistory();}
+ },()=>{if(generation===aiHistoryGeneration){const st=document.getElementById('ai-history-status');if(st)st.textContent='Показываю историю, сохранённую на этом устройстве; облако временно недоступно.';}});
+}
 function firebaseRecordId(key){ return key.replace(/^zeti:/, ''); }
 function cloudRecordRef(uid, key){ return firestoreSdk.doc(firebaseDb, 'users', uid, 'data', firebaseRecordId(key)); }
 function readJSON(raw, fallback){ if(raw == null) return fallback; try{ return JSON.parse(raw); }catch(e){ return fallback; } }
@@ -633,6 +671,7 @@ function cacheCloudSnapshot(uid, snapshot){
   snapshot.forEach(item=>values.set('zeti:' + item.id, item.data().value));
   for(const key of TRACKER_KEYS){
     const cacheKey = cloudCacheKey(uid, key);
+    if(lsGet(cloudDirtyKey(uid,key))) continue;
     if(values.has(key)) lsSet(cacheKey, JSON.stringify(values.get(key)));
     else { try{ localStorage.removeItem(cacheKey); }catch(e){ delete _mem[cacheKey]; } }
   }
@@ -662,6 +701,7 @@ async function synchronizeFirebaseUser(user, generation=authGeneration){
       lsSet(CLOUD_MIGRATION_OWNER_KEY, user.uid);
     }
     if(generation !== authGeneration || firebaseUser?.uid !== user.uid) return;
+    loadAIHistoryForUser(user.uid,generation);
     const userData = firestoreSdk.collection(firebaseDb, 'users', user.uid, 'data');
     const snapshot = await firestoreSdk.getDocs(userData);
     if(generation !== authGeneration || firebaseUser?.uid !== user.uid) return;
@@ -695,9 +735,12 @@ async function saveVal(key, val){
   await initialAuthReady;
   if(!TRACKER_KEYS.includes(key)){ lsSet(key, JSON.stringify(val)); return; }
   if(!firebaseUser){ lsSet(key, JSON.stringify(val)); return; }
-  lsSet(cloudCacheKey(firebaseUser.uid, key), JSON.stringify(val));
+  const uid=firebaseUser.uid, dirty=cloudDirtyKey(uid,key);
+  lsSet(cloudCacheKey(uid,key), JSON.stringify(val)); lsSet(dirty,'1');
   try{
-    await firestoreSdk.setDoc(cloudRecordRef(firebaseUser.uid, key), {value: val, updatedAt: firestoreSdk.serverTimestamp()});
+    await firestoreSdk.setDoc(cloudRecordRef(uid, key), {value: val, updatedAt: firestoreSdk.serverTimestamp()});
+    try{localStorage.removeItem(dirty);}catch(e){delete _mem[dirty];}
+    lsSet(cloudCacheKey(uid,key),JSON.stringify(val));
     if(cloudReady) setCloudStatus('Изменения сохранены и синхронизированы · ' + (firebaseUser.email || 'Google'), 'connected');
   }catch(error){ showCloudError(error); }
 }
@@ -722,7 +765,9 @@ async function initializeFirebaseSync(){
     authSdk.onAuthStateChanged(firebaseAuth, async user=>{
       const generation = ++authGeneration;
       if(cloudUnsubscribe){ cloudUnsubscribe(); cloudUnsubscribe = null; }
+      if(aiHistoryUnsubscribe){aiHistoryUnsubscribe();aiHistoryUnsubscribe=null;} aiHistoryGeneration++;
       firebaseUser = user || null;
+      if(!firebaseUser){aiHistory=readAIHistory();renderAIHistory();}
       cloudReady = false;
       if(!firebaseUser){
         if(redirectError){
@@ -747,10 +792,15 @@ async function initializeFirebaseSync(){
 document.getElementById('cloud-sign-in').addEventListener('click', async ()=>{
   try{
     if(!firebaseAuth) throw new Error('Firebase SDK is not available');
-    const provider = new authSdk.GoogleAuthProvider();
-    setCloudStatus('Открываю окно входа Google…');
-    await authSdk.signInWithPopup(firebaseAuth, provider);
-  }catch(error){ showCloudError(error); }
+    const provider=new authSdk.GoogleAuthProvider(), mobile=/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+    if(mobile){setCloudStatus('Переходим к безопасному входу Google…');await authSdk.signInWithRedirect(firebaseAuth,provider);return;}
+    setCloudStatus('Открываю окно входа Google…');await authSdk.signInWithPopup(firebaseAuth,provider);
+  }catch(error){
+    if(error?.code==='auth/popup-blocked'||error?.code==='auth/cancelled-popup-request'){
+      try{await authSdk.signInWithRedirect(firebaseAuth,new authSdk.GoogleAuthProvider());return;}catch(redirectError){error=redirectError;}
+    }
+    showCloudError(error);
+  }
 });
 document.getElementById('cloud-sign-out').addEventListener('click', ()=>{
   if(firebaseAuth) authSdk.signOut(firebaseAuth).catch(showCloudError);
@@ -758,7 +808,7 @@ document.getElementById('cloud-sign-out').addEventListener('click', ()=>{
 document.getElementById('cloud-retry').addEventListener('click', ()=>{
   if(firebaseUser) synchronizeFirebaseUser(firebaseUser, authGeneration);
 });
-function today(){ return new Date().toISOString().slice(0,10); }
+function today(){const d=new Date();return [d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');}
 function fmtDate(d){ return new Date(d+'T00:00:00').toLocaleDateString('ru-RU',{day:'numeric',month:'long'}); }
 
 // ================= tabs + swipe =================
@@ -860,10 +910,16 @@ async function renderMeals(){
   if(!t.length){ el.innerHTML = '<div class="empty">Сегодня пока нет записей</div>'; return; }
   const byType = {};
   t.forEach(m=>{ (byType[m.meal] ||= []).push(m); });
-  el.innerHTML = Object.keys(byType).map(type=>`
-    <div class="day-group"><div class="day-label">${type}</div>
-    ${byType[type].map(m=>`<div class="row"><span>${m.name}</span><span class="meta">${m.calories} ккал</span></div>`).join('')}
-    </div>`).join('');
+  el.replaceChildren();
+  for(const [type,items] of Object.entries(byType)){
+    const group=document.createElement('div');group.className='day-group';
+    const label=document.createElement('div');label.className='day-label';label.textContent=type;group.appendChild(label);
+    for(const meal of items){const row=document.createElement('div');row.className='row';
+      const name=document.createElement('span');name.textContent=meal.name||'';
+      const meta=document.createElement('span');meta.className='meta';meta.textContent=(Number(meal.calories)||0)+' ккал';
+      row.append(name,meta);group.appendChild(row);}
+    el.appendChild(group);
+  }
 }
 document.getElementById('m-add').addEventListener('click', async ()=>{
   const name = document.getElementById('m-name').value.trim();
@@ -914,12 +970,13 @@ const BASE_RECIPES = [
 ];
 async function allRecipes(){ return [...BASE_RECIPES, ...(await loadArr('zeti:custom-recipes'))]; }
 function recipeCard(r){
-  return `<div class="recipe-card">
-    <div class="name">${r.name}</div>
-    <div class="macros">${r.macros.cal} ккал · Б ${r.macros.protein} · У ${r.macros.carbs} · Ж ${r.macros.fat}</div>
-    <div class="toggle">Показать приготовление</div>
-    <div class="steps">${r.steps}</div>
-  </div>`;
+  const card=document.createElement('div');card.className='recipe-card';
+  const name=document.createElement('div');name.className='name';name.textContent=r?.name||'';
+  const macros=document.createElement('div');macros.className='macros';const m=r?.macros||{};
+  macros.textContent=(Number(m.cal)||0)+' ккал · Б '+(Number(m.protein)||0)+' · У '+(Number(m.carbs)||0)+' · Ж '+(Number(m.fat)||0);
+  const toggle=document.createElement('div');toggle.className='toggle';toggle.textContent='Показать приготовление';
+  const steps=document.createElement('div');steps.className='steps';steps.textContent=r?.steps||'';
+  card.append(name,macros,toggle,steps);return card;
 }
 function bindRecipeToggles(container){
   container.querySelectorAll('.recipe-card').forEach(card=>{
@@ -936,7 +993,9 @@ document.getElementById('ing-search').addEventListener('click', async ()=>{
   const recipes = await allRecipes();
   const scored = recipes.map(r=>({r, score: r.ingredients.filter(i=>input.some(q=>i.includes(q)||q.includes(i))).length}))
     .filter(x=>x.score>0).sort((a,b)=>b.score-a.score);
-  el.innerHTML = scored.length ? scored.map(x=>recipeCard(x.r)).join('') : '<div class="empty">Ничего не найдено в базе — попробуйте спросить ИИ</div>';
+  el.replaceChildren();
+  if(scored.length){for(const item of scored)el.appendChild(recipeCard(item.r));}
+  else{const empty=document.createElement('div');empty.className='empty';empty.textContent='Ничего не найдено в базе — попробуйте спросить ИИ';el.appendChild(empty);}
   bindRecipeToggles(el);
 });
 document.getElementById('ing-ai').addEventListener('click', async ()=>{
@@ -1020,10 +1079,15 @@ async function renderSupplements(){
   const takenToday = takenLog[today()] || [];
   const el = document.getElementById('sp-list');
   if(!items.length){ el.innerHTML = '<div class="empty">Список пуст</div>'; return; }
-  el.innerHTML = items.map(it=>`
-    <div class="supp-item"><div class="supp-info"><div>${it.name}</div><div class="time">${it.time||''}</div></div>
-    <div class="check ${takenToday.includes(it.id)?'on':''}" data-id="${it.id}">${takenToday.includes(it.id)?'✓':''}</div></div>
-  `).join('');
+  el.replaceChildren();
+  for(const item of items){const row=document.createElement('div');row.className='supp-item';
+    const info=document.createElement('div');info.className='supp-info';
+    const name=document.createElement('div');name.textContent=item.name||'';
+    const time=document.createElement('div');time.className='time';time.textContent=item.time||'';
+    const check=document.createElement('div');check.className='check'+(takenToday.includes(item.id)?' on':'');
+    check.dataset.id=String(item.id||'');check.textContent=takenToday.includes(item.id)?'✓':'';
+    info.append(name,time);row.append(info,check);el.appendChild(row);
+  }
   el.querySelectorAll('.check').forEach(c=>c.addEventListener('click', async ()=>{
     const id = c.dataset.id; const log = await loadObj('zeti:supplement-log');
     const list = log[today()] || [];
@@ -1058,6 +1122,7 @@ document.getElementById('ai-run').addEventListener('click', async ()=>{
 });
 
 // ================= init =================
+aiHistory=readAIHistory();renderAIHistory();
 initializeFirebaseSync();
 let openRouterConnected = false;
 try { openRouterConnected = Boolean(getOpenRouterKey()); } catch(e) {}
