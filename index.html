@@ -120,6 +120,12 @@
   .ai-account-status.connected{color:#9bc8a3;}
   .ai-account-status.error{color:#ff8e8e;}
   .ai-account-actions{display:flex; gap:8px; flex-wrap:wrap;}
+  .cloud-account{display:flex; flex-direction:column; gap:10px; margin:14px 20px 0; padding:14px; border:1px solid var(--line); background:var(--black-2);}
+  .cloud-account-row{display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;}
+  .cloud-account-status{font-size:12.5px; color:var(--grey); line-height:1.45;}
+  .cloud-account-status.connected{color:#9bc8a3;}
+  .cloud-account-status.error{color:#ff8e8e;}
+  .cloud-account-actions{display:flex; gap:8px; flex-wrap:wrap;}
 
   .camera-box{border:1px dashed var(--line); padding:20px; text-align:center; margin-bottom:14px; position:relative;}
   .camera-box img{max-width:100%; max-height:160px; margin-top:10px;}
@@ -172,6 +178,18 @@
       <button data-lvl="Профессионал">Профи</button>
     </div>
   </header>
+
+  <section class="cloud-account" aria-label="Синхронизация данных">
+    <div class="cloud-account-row">
+      <div class="cloud-account-status" id="cloud-status" role="status" aria-live="polite">Проверяю Google-аккаунт…</div>
+      <div class="cloud-account-actions">
+        <button class="ghost" id="cloud-sign-in" type="button">Войти через Google</button>
+        <button class="ghost" id="cloud-retry" type="button" hidden>Повторить синхронизацию</button>
+        <button class="ghost" id="cloud-sign-out" type="button" hidden>Выйти</button>
+      </div>
+    </div>
+    <div class="cloud-account-status">Личные записи синхронизируются между устройствами. OpenRouter подключается отдельно и остаётся на этом устройстве.</div>
+  </section>
 
   <main id="main">
 
@@ -348,7 +366,18 @@
 
 </div>
 
-<script>
+<script type="module">
+const firebaseConfig = {
+  apiKey: "AIzaSyB5v2FWw9nfgNQIIzvdH8Y_YeITjyV7AgI",
+  authDomain: "zeti-8e6cb.firebaseapp.com",
+  projectId: "zeti-8e6cb",
+  storageBucket: "zeti-8e6cb.firebasestorage.app",
+  messagingSenderId: "463877781345",
+  appId: "1:463877781345:web:2011010df9f35d37ec7720"
+};
+let firebaseAuth = null, firebaseDb = null, authSdk = null, firestoreSdk = null;
+
+//
 // ================= Telegram =================
 try{
   if(window.Telegram && window.Telegram.WebApp){ window.Telegram.WebApp.ready(); window.Telegram.WebApp.expand(); }
@@ -517,13 +546,202 @@ function animateNumber(el, to, duration=650){
   requestAnimationFrame(step);
 }
 
-// ================= storage helpers (localStorage — works standalone & in Telegram) =================
+// ================= storage helpers + per-account Firebase sync =================
 const _mem = {};
 function lsGet(key){ try{ return localStorage.getItem(key); }catch(e){ return (key in _mem) ? _mem[key] : null; } }
 function lsSet(key, val){ try{ localStorage.setItem(key, val); }catch(e){ _mem[key] = val; } }
-async function loadArr(key){ const v = lsGet(key); try{ return v ? JSON.parse(v) : []; }catch(e){ return []; } }
-async function loadObj(key){ const v = lsGet(key); try{ return v ? JSON.parse(v) : {}; }catch(e){ return {}; } }
-async function saveVal(key, val){ lsSet(key, JSON.stringify(val)); }
+const TRACKER_KEYS = [
+  'zeti:settings', 'zeti:targets', 'zeti:meal-log', 'zeti:bodyweight-log',
+  'zeti:custom-recipes', 'zeti:program', 'zeti:supplements', 'zeti:supplement-log'
+];
+const CLOUD_MIGRATION_OWNER_KEY = 'zeti:cloud-migration-owner';
+let firebaseUser = null;
+let cloudReady = false;
+let cloudUnsubscribe = null;
+let resolveInitialAuth;
+let initialAuthResolved = false;
+let authGeneration = 0;
+const initialAuthReady = new Promise(resolve => { resolveInitialAuth = resolve; });
+function cloudCacheKey(uid, key){ return 'zeti:cloud-cache:' + uid + ':' + key; }
+function firebaseRecordId(key){ return key.replace(/^zeti:/, ''); }
+function cloudRecordRef(uid, key){ return firestoreSdk.doc(firebaseDb, 'users', uid, 'data', firebaseRecordId(key)); }
+function readJSON(raw, fallback){ if(raw == null) return fallback; try{ return JSON.parse(raw); }catch(e){ return fallback; } }
+function emptyTrackerValue(key){ return /(?:meal-log|bodyweight-log|custom-recipes|supplements)$/.test(key) ? [] : {}; }
+function hasTrackerData(value){
+  if(Array.isArray(value)) return value.length > 0;
+  if(value && typeof value === 'object') return Object.keys(value).length > 0;
+  return value !== null && value !== undefined && value !== '';
+}
+function stableValue(value){
+  if(Array.isArray(value)) return value.map(stableValue);
+  if(value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key=>[key,stableValue(value[key])]));
+  return value;
+}
+function mergeTrackerValue(key, localValue, cloudValue){
+  if(Array.isArray(localValue) && Array.isArray(cloudValue)){
+    const merged = [], seen = new Set();
+    for(const item of [...cloudValue, ...localValue]){
+      const signature = JSON.stringify(stableValue(item));
+      if(!seen.has(signature)){ seen.add(signature); merged.push(item); }
+    }
+    return merged;
+  }
+  if(key === 'zeti:supplement-log' && localValue && cloudValue && typeof localValue === 'object' && typeof cloudValue === 'object'){
+    const merged = {...localValue, ...cloudValue};
+    for(const day of Object.keys(localValue)){
+      if(Array.isArray(localValue[day]) && Array.isArray(cloudValue[day])){
+        merged[day] = [...new Set([...cloudValue[day], ...localValue[day]])];
+      }else if(!(day in cloudValue)) merged[day] = localValue[day];
+    }
+    return merged;
+  }
+  if(localValue && cloudValue && typeof localValue === 'object' && typeof cloudValue === 'object' && !Array.isArray(localValue) && !Array.isArray(cloudValue)){
+    return {...localValue, ...cloudValue};
+  }
+  return cloudValue === undefined ? localValue : cloudValue;
+}
+function setCloudStatus(message, state=''){
+  const status = document.getElementById('cloud-status');
+  if(status){ status.textContent = message; status.className = 'cloud-account-status' + (state ? ' ' + state : ''); }
+  const signedIn = Boolean(firebaseUser);
+  document.getElementById('cloud-sign-in').hidden = signedIn;
+  document.getElementById('cloud-sign-out').hidden = !signedIn;
+  document.getElementById('cloud-retry').hidden = !signedIn || cloudReady;
+}
+function showCloudError(error){
+  const code = error?.code || '';
+  if(code === 'permission-denied' || code === 'firestore/permission-denied'){
+    setCloudStatus('Firebase не разрешил доступ. Нужно обновить правила Firestore.', 'error');
+  }else if(code === 'auth/unauthorized-domain'){
+    setCloudStatus('Адрес сайта ещё не добавлен в разрешённые домены Firebase.', 'error');
+  }else if(code === 'auth/popup-closed-by-user'){
+    setCloudStatus('Окно Google закрыто до завершения входа.', 'error');
+  }else{
+    setCloudStatus('Не удалось синхронизировать данные. Проверьте интернет и повторите попытку.', 'error');
+  }
+}
+function rerenderTracker(){
+  renderRings(); renderMeals(); renderChart(); renderSupplements();
+}
+function cacheCloudSnapshot(uid, snapshot){
+  const values = new Map();
+  snapshot.forEach(item=>values.set('zeti:' + item.id, item.data().value));
+  for(const key of TRACKER_KEYS){
+    const cacheKey = cloudCacheKey(uid, key);
+    if(values.has(key)) lsSet(cacheKey, JSON.stringify(values.get(key)));
+    else { try{ localStorage.removeItem(cacheKey); }catch(e){ delete _mem[cacheKey]; } }
+  }
+  cloudReady = true;
+  setCloudStatus('Синхронизация включена · ' + (firebaseUser?.email || 'Google'), 'connected');
+  rerenderTracker();
+}
+async function synchronizeFirebaseUser(user, generation=authGeneration){
+  cloudReady = false;
+  setCloudStatus('Загружаю ваши записи из облака…');
+  try{
+    if(generation !== authGeneration || firebaseUser?.uid !== user.uid) return;
+    const previousOwner = lsGet(CLOUD_MIGRATION_OWNER_KEY);
+    if(previousOwner == null || previousOwner === user.uid){
+      for(const key of TRACKER_KEYS){
+        if(generation !== authGeneration || firebaseUser?.uid !== user.uid) return;
+        const localValue = readJSON(lsGet(key), emptyTrackerValue(key));
+        if(!hasTrackerData(localValue)) continue;
+        await firestoreSdk.runTransaction(firebaseDb, async transaction=>{
+          const ref = cloudRecordRef(user.uid, key);
+          const current = await transaction.get(ref);
+          const cloudValue = current.exists() ? current.data().value : undefined;
+          const merged = mergeTrackerValue(key, localValue, cloudValue);
+          transaction.set(ref, {value: merged, updatedAt: firestoreSdk.serverTimestamp()});
+        });
+      }
+      lsSet(CLOUD_MIGRATION_OWNER_KEY, user.uid);
+    }
+    if(generation !== authGeneration || firebaseUser?.uid !== user.uid) return;
+    const userData = firestoreSdk.collection(firebaseDb, 'users', user.uid, 'data');
+    const snapshot = await firestoreSdk.getDocs(userData);
+    if(generation !== authGeneration || firebaseUser?.uid !== user.uid) return;
+    cacheCloudSnapshot(user.uid, snapshot);
+    cloudUnsubscribe = firestoreSdk.onSnapshot(
+      userData,
+      next=>{ if(generation === authGeneration && firebaseUser?.uid === user.uid) cacheCloudSnapshot(user.uid, next); },
+      error=>{ if(generation === authGeneration && firebaseUser?.uid === user.uid){ cloudReady = false; showCloudError(error); } }
+    );
+    if(previousOwner && previousOwner !== user.uid){
+      setCloudStatus('Загружен аккаунт ' + (user.email || 'Google') + '. Старые локальные записи остались у прежнего аккаунта и не переносились.', 'connected');
+    }
+  }catch(error){
+    cloudReady = false;
+    showCloudError(error);
+  }
+}
+async function loadArr(key){
+  await initialAuthReady;
+  const raw = firebaseUser ? lsGet(cloudCacheKey(firebaseUser.uid, key)) : lsGet(key);
+  const value = readJSON(raw, []);
+  return Array.isArray(value) ? value : [];
+}
+async function loadObj(key){
+  await initialAuthReady;
+  const raw = firebaseUser ? lsGet(cloudCacheKey(firebaseUser.uid, key)) : lsGet(key);
+  const value = readJSON(raw, {});
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+async function saveVal(key, val){
+  await initialAuthReady;
+  if(!TRACKER_KEYS.includes(key)){ lsSet(key, JSON.stringify(val)); return; }
+  if(!firebaseUser){ lsSet(key, JSON.stringify(val)); return; }
+  lsSet(cloudCacheKey(firebaseUser.uid, key), JSON.stringify(val));
+  try{
+    await firestoreSdk.setDoc(cloudRecordRef(firebaseUser.uid, key), {value: val, updatedAt: firestoreSdk.serverTimestamp()});
+    if(cloudReady) setCloudStatus('Изменения сохранены и синхронизированы · ' + (firebaseUser.email || 'Google'), 'connected');
+  }catch(error){ showCloudError(error); }
+}
+async function initializeFirebaseSync(){
+  try{
+    const [appSdk, loadedAuthSdk, loadedFirestoreSdk] = await Promise.all([
+      import("https://www.gstatic.com/firebasejs/13.0.0/firebase-app.js"),
+      import("https://www.gstatic.com/firebasejs/13.0.0/firebase-auth.js"),
+      import("https://www.gstatic.com/firebasejs/13.0.0/firebase-firestore.js")
+    ]);
+    authSdk = loadedAuthSdk;
+    firestoreSdk = loadedFirestoreSdk;
+    const firebaseApp = appSdk.initializeApp(firebaseConfig);
+    firebaseAuth = authSdk.getAuth(firebaseApp);
+    firebaseDb = firestoreSdk.getFirestore(firebaseApp);
+    authSdk.onAuthStateChanged(firebaseAuth, async user=>{
+      const generation = ++authGeneration;
+      if(cloudUnsubscribe){ cloudUnsubscribe(); cloudUnsubscribe = null; }
+      firebaseUser = user || null;
+      cloudReady = false;
+      if(!firebaseUser){
+        setCloudStatus('Войдите через Google, чтобы включить синхронизацию. Записи останутся в этом браузере.');
+        cloudReady = true;
+        rerenderTracker();
+      }else{
+        await synchronizeFirebaseUser(firebaseUser, generation);
+      }
+      if(!initialAuthResolved){ initialAuthResolved = true; resolveInitialAuth(); }
+    });
+  }catch(error){
+    cloudReady = true;
+    setCloudStatus('Облачная синхронизация временно недоступна. Записи пока сохраняются в этом браузере.', 'error');
+    if(!initialAuthResolved){ initialAuthResolved = true; resolveInitialAuth(); }
+  }
+}
+document.getElementById('cloud-sign-in').addEventListener('click', async ()=>{
+  try{
+    if(!firebaseAuth) throw new Error('Firebase SDK is not available');
+    const provider = new authSdk.GoogleAuthProvider();
+    if(/android|iphone|ipad|mobile/i.test(navigator.userAgent)) await authSdk.signInWithRedirect(firebaseAuth, provider);
+    else await authSdk.signInWithPopup(firebaseAuth, provider);
+  }catch(error){ showCloudError(error); }
+});
+document.getElementById('cloud-sign-out').addEventListener('click', ()=>{
+  if(firebaseAuth) authSdk.signOut(firebaseAuth).catch(showCloudError);
+});
+document.getElementById('cloud-retry').addEventListener('click', ()=>{
+  if(firebaseUser) synchronizeFirebaseUser(firebaseUser, authGeneration);
+});
 function today(){ return new Date().toISOString().slice(0,10); }
 function fmtDate(d){ return new Date(d+'T00:00:00').toLocaleDateString('ru-RU',{day:'numeric',month:'long'}); }
 
@@ -824,6 +1042,7 @@ document.getElementById('ai-run').addEventListener('click', async ()=>{
 });
 
 // ================= init =================
+initializeFirebaseSync();
 let openRouterConnected = false;
 try { openRouterConnected = Boolean(getOpenRouterKey()); } catch(e) {}
 setOpenRouterStatus(openRouterConnected ? 'OpenRouter уже подключён.' : 'Для работы ИИ подключите свой аккаунт OpenRouter.', openRouterConnected ? 'connected' : '');
