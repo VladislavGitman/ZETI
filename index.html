@@ -810,12 +810,6 @@ async function initializeFirebaseSync(){
     const firebaseApp = appSdk.initializeApp(firebaseConfig);
     firebaseAuth = authSdk.getAuth(firebaseApp);
     firebaseDb = firestoreSdk.getFirestore(firebaseApp);
-    let redirectError = null;
-    try{
-      await authSdk.getRedirectResult(firebaseAuth);
-    }catch(error){
-      redirectError = error;
-    }
     authSdk.onAuthStateChanged(firebaseAuth, async user=>{
       const generation = ++authGeneration;
       if(cloudUnsubscribe){ cloudUnsubscribe(); cloudUnsubscribe = null; }
@@ -824,12 +818,7 @@ async function initializeFirebaseSync(){
       if(!firebaseUser){aiHistory=readAIHistory();renderAIHistory();}
       cloudReady = false;
       if(!firebaseUser){
-        if(redirectError){
-          showCloudError(redirectError);
-          redirectError = null;
-        }else{
-          setCloudStatus('Войдите через Google, чтобы включить синхронизацию. Записи останутся в этом браузере.');
-        }
+        setCloudStatus('Войдите через Google, чтобы включить синхронизацию. Записи останутся в этом браузере.');
         cloudReady = true;
         rerenderTracker();
       }else{
