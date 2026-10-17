@@ -576,6 +576,7 @@ const initialAuthReady = new Promise(resolve => { resolveInitialAuth = resolve; 
 function cloudCacheKey(uid, key){ return 'zeti:cloud-cache:' + uid + ':' + key; }
 function cloudDirtyKey(uid,key){return 'zeti:cloud-dirty:'+uid+':'+key;}
 function aiHistoryCacheKey(uid){return 'zeti:ai-history:'+uid;}
+function aiHistoryDirtyKey(uid){return 'zeti:ai-history-pending:'+uid;}
 function aiHistoryRef(uid){return firestoreSdk.doc(firebaseDb,'users',uid,'data','ai-history');}
 function readAIHistory(uid=null){const a=readJSON(lsGet(uid?aiHistoryCacheKey(uid):AI_HISTORY_KEY),[]);return Array.isArray(a)?a.filter(x=>x&&typeof x.question==='string'&&typeof x.answer==='string').slice(0,AI_HISTORY_LIMIT):[];}
 function writeAIHistory(a,uid=null){lsSet(uid?aiHistoryCacheKey(uid):AI_HISTORY_KEY,JSON.stringify(a.slice(0,AI_HISTORY_LIMIT)));}
@@ -590,18 +591,39 @@ function renderAIHistory(){
  card.append(q,a,d);list.appendChild(card);}
 }
 function receiveAIHistory(entries,uid=null){const a=Array.isArray(entries)?entries.filter(x=>x&&typeof x.question==='string'&&typeof x.answer==='string').slice(0,AI_HISTORY_LIMIT):[];aiHistory=a;writeAIHistory(a,uid);renderAIHistory();}
+function mergeAIHistory(localEntries,cloudEntries){
+ const byId=new Map();
+ for(const item of [...localEntries,...cloudEntries]) byId.set(item.createdAt+'|'+item.question,item);
+ return [...byId.values()].sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt))).slice(0,AI_HISTORY_LIMIT);
+}
+async function persistAIHistory(uid,entries){
+ const pending=aiHistoryDirtyKey(uid);lsSet(pending,'1');
+ try{
+  await firestoreSdk.setDoc(aiHistoryRef(uid),{entries,updatedAt:firestoreSdk.serverTimestamp()});
+  try{localStorage.removeItem(pending);}catch(e){delete _mem[pending];}
+  return true;
+ }catch(error){return false;}
+}
 async function saveAIHistory(question,answer){
  const uid=firebaseUser?.uid||null,entry={question:String(question).slice(0,2000),answer:String(answer).slice(0,12000),createdAt:new Date().toISOString()};
  const entries=[entry,...(uid?readAIHistory(uid):aiHistory)].slice(0,AI_HISTORY_LIMIT);aiHistory=entries;writeAIHistory(entries,uid);renderAIHistory();
- if(uid&&firestoreSdk&&firebaseDb)try{await firestoreSdk.setDoc(aiHistoryRef(uid),{entries,updatedAt:firestoreSdk.serverTimestamp()});}
- catch(error){const st=document.getElementById('ai-history-status');if(st)st.textContent='Ответ сохранён на этом устройстве; синхронизация истории не удалась. Проверьте интернет.';}
+ if(uid&&firestoreSdk&&firebaseDb&&!await persistAIHistory(uid,entries)){
+  const st=document.getElementById('ai-history-status');if(st)st.textContent='Ответ сохранён на этом устройстве; синхронизация истории не удалась. Проверьте интернет.';
+ }
 }
 function loadAIHistoryForUser(uid,generation){
  if(aiHistoryUnsubscribe){aiHistoryUnsubscribe();aiHistoryUnsubscribe=null;}aiHistoryGeneration=generation;
  aiHistory=readAIHistory(uid);renderAIHistory();
- aiHistoryUnsubscribe=firestoreSdk.onSnapshot(aiHistoryRef(uid),snap=>{
+ aiHistoryUnsubscribe=firestoreSdk.onSnapshot(aiHistoryRef(uid),async snap=>{
   if(generation!==aiHistoryGeneration||firebaseUser?.uid!==uid)return;
-  if(snap.exists())receiveAIHistory(snap.data().entries,uid);else{aiHistory=readAIHistory(uid);renderAIHistory();}
+  const local=readAIHistory(uid), cloud=snap.exists()?snap.data().entries:[];
+  if(lsGet(aiHistoryDirtyKey(uid))||!snap.exists()&&local.length){
+   const merged=mergeAIHistory(local,Array.isArray(cloud)?cloud:[]);
+   aiHistory=merged;writeAIHistory(merged,uid);renderAIHistory();
+   if(!await persistAIHistory(uid,merged)&&generation===aiHistoryGeneration){
+    const st=document.getElementById('ai-history-status');if(st)st.textContent='История сохранена на устройстве и ожидает синхронизации.';
+   }
+  }else receiveAIHistory(cloud,uid);
  },()=>{if(generation===aiHistoryGeneration){const st=document.getElementById('ai-history-status');if(st)st.textContent='Показываю историю, сохранённую на этом устройстве; облако временно недоступно.';}});
 }
 function firebaseRecordId(key){ return key.replace(/^zeti:/, ''); }
