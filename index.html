@@ -699,7 +699,9 @@ function showCloudError(error){
   }else if(code === 'auth/popup-closed-by-user'){
     setCloudStatus('Окно Google закрыто до завершения входа.', 'error');
   }else if(code === 'auth/popup-blocked' || code === 'auth/web-storage-unsupported' || code === 'auth/operation-not-supported-in-this-environment'){
-    setCloudStatus('Браузер не открыл окно Google. Откройте сайт напрямую в Chrome или Safari и попробуйте ещё раз.', 'error');
+    setCloudStatus('Браузер заблокировал окно входа. Откройте сайт напрямую в Chrome или Safari, разрешите всплывающие окна и попробуйте ещё раз.', 'error');
+  }else if(code === 'auth/network-request-failed'){
+    setCloudStatus('Не удалось связаться с Google. Проверьте интернет и попробуйте ещё раз.', 'error');
   }else{
     setCloudStatus('Не удалось синхронизировать данные. Проверьте интернет и повторите попытку.', 'error');
   }
@@ -724,6 +726,17 @@ async function synchronizeFirebaseUser(user, generation=authGeneration){
   cloudReady = false;
   setCloudStatus('Загружаю ваши записи из облака…');
   try{
+    if(generation !== authGeneration || firebaseUser?.uid !== user.uid) return;
+    const profileRef = firestoreSdk.doc(firebaseDb, 'users', user.uid);
+    const profileSnapshot = await firestoreSdk.getDoc(profileRef);
+    if(generation !== authGeneration || firebaseUser?.uid !== user.uid) return;
+    const profile = {
+      email: user.email || '',
+      displayName: user.displayName || '',
+      updatedAt: firestoreSdk.serverTimestamp()
+    };
+    if(!profileSnapshot.exists()) profile.createdAt = firestoreSdk.serverTimestamp();
+    await firestoreSdk.setDoc(profileRef, profile, {merge:true});
     if(generation !== authGeneration || firebaseUser?.uid !== user.uid) return;
     const previousOwner = lsGet(CLOUD_MIGRATION_OWNER_KEY);
     if(previousOwner == null || previousOwner === user.uid){
@@ -833,13 +846,11 @@ async function initializeFirebaseSync(){
 document.getElementById('cloud-sign-in').addEventListener('click', async ()=>{
   try{
     if(!firebaseAuth) throw new Error('Firebase SDK is not available');
-    const provider=new authSdk.GoogleAuthProvider(), mobile=/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
-    if(mobile){setCloudStatus('Переходим к безопасному входу Google…');await authSdk.signInWithRedirect(firebaseAuth,provider);return;}
-    setCloudStatus('Открываю окно входа Google…');await authSdk.signInWithPopup(firebaseAuth,provider);
+    const provider=new authSdk.GoogleAuthProvider();
+    provider.setCustomParameters({prompt:'select_account'});
+    setCloudStatus('Открываю окно входа Google…');
+    await authSdk.signInWithPopup(firebaseAuth,provider);
   }catch(error){
-    if(error?.code==='auth/popup-blocked'||error?.code==='auth/cancelled-popup-request'){
-      try{await authSdk.signInWithRedirect(firebaseAuth,new authSdk.GoogleAuthProvider());return;}catch(redirectError){error=redirectError;}
-    }
     showCloudError(error);
   }
 });
