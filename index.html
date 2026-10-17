@@ -116,9 +116,11 @@
    .ai-output.loading{color:var(--grey); font-style:italic;}
   .ai-history{display:flex;flex-direction:column;gap:10px;margin-top:10px;}
   .ai-history-entry{padding:12px;background:var(--black-3);border-left:2px solid var(--red);}
-  .ai-history-question{font-size:13px;font-weight:600;white-space:pre-wrap;}
+  .ai-history-question{display:block;width:100%;padding:0;border:0;background:none;color:var(--ivory);font:600 13px 'Inter',system-ui,sans-serif;text-align:left;white-space:pre-wrap;cursor:pointer;}
+  .ai-history-question:focus-visible,.ai-history-toggle:focus-visible{outline:2px solid var(--red);outline-offset:3px;}
   .ai-history-answer{font-size:13px;line-height:1.5;color:var(--ivory-dim,#c9c4ba);white-space:pre-wrap;margin-top:7px;}
   .ai-history-date{font-size:11px;color:var(--grey);margin-top:7px;}
+  .ai-history-toggle{margin:0 0 10px;}
   .ai-account{display:flex; flex-direction:column; gap:10px; margin:14px 0 18px; padding:14px; border:1px solid var(--line); background:var(--black-2);}
   .ai-account-row{display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;}
   .ai-account-status{font-size:12.5px; color:var(--grey); line-height:1.45;}
@@ -346,8 +348,11 @@
         </div>
         <div class="ai-output" id="ai-question-output" aria-live="polite"></div>
         <div class="sub-title">История вопросов ИИ</div>
-        <div class="ai-account-status" id="ai-history-status" role="status" aria-live="polite">История появится после первого ответа ИИ.</div>
-        <div class="ai-history" id="ai-history" aria-live="polite"></div>
+        <button class="ghost ai-history-toggle" id="ai-history-toggle" type="button" aria-expanded="true" aria-controls="ai-history-content">Скрыть историю</button>
+        <div id="ai-history-content">
+          <div class="ai-account-status" id="ai-history-status" role="status" aria-live="polite">История появится после первого ответа ИИ.</div>
+          <div class="ai-history" id="ai-history" aria-live="polite"></div>
+        </div>
       </div>
       <textarea id="ai-context" placeholder="Контекст для анализа — необязательно"></textarea>
       <button class="primary" id="ai-run" style="margin-top:12px;">Проанализировать</button>
@@ -565,7 +570,8 @@ const TRACKER_KEYS = [
 ];
 const CLOUD_MIGRATION_OWNER_KEY = 'zeti:cloud-migration-owner';
 const AI_HISTORY_KEY='zeti:ai-history', AI_HISTORY_LIMIT=30;
-let aiHistoryUnsubscribe=null, aiHistoryGeneration=0, aiHistory=[];
+const AI_HISTORY_COLLAPSED_KEY='zeti:ai-history-collapsed';
+let aiHistoryUnsubscribe=null, aiHistoryGeneration=0, aiHistory=[], aiHistoryCollapsed=false;
 let firebaseUser = null;
 let cloudReady = false;
 let cloudUnsubscribe = null;
@@ -582,14 +588,27 @@ function readAIHistory(uid=null){const a=readJSON(lsGet(uid?aiHistoryCacheKey(ui
 function writeAIHistory(a,uid=null){lsSet(uid?aiHistoryCacheKey(uid):AI_HISTORY_KEY,JSON.stringify(a.slice(0,AI_HISTORY_LIMIT)));}
 function renderAIHistory(){
  const list=document.getElementById('ai-history'),status=document.getElementById('ai-history-status');if(!list||!status)return;
+ const content=document.getElementById('ai-history-content'),toggle=document.getElementById('ai-history-toggle');
+ if(content)content.hidden=aiHistoryCollapsed;
+ if(toggle){toggle.setAttribute('aria-expanded',String(!aiHistoryCollapsed));toggle.textContent=aiHistoryCollapsed?'Показать историю':'Скрыть историю';toggle.disabled=!aiHistory.length;}
  list.replaceChildren();if(!aiHistory.length){status.textContent='История появится после первого ответа ИИ.';return;}
  status.textContent='Последние вопросы и ответы ('+aiHistory.length+').';
- for(const entry of aiHistory){const card=document.createElement('article');card.className='ai-history-entry';
- const q=document.createElement('div');q.className='ai-history-question';q.textContent='Вы: '+entry.question;
- const a=document.createElement('div');a.className='ai-history-answer';a.textContent='ИИ: '+entry.answer;
+ for(const [index,entry] of aiHistory.entries()){const card=document.createElement('article');card.className='ai-history-entry';
+ const answerId='ai-history-answer-'+index,key=entry.createdAt+'|'+entry.question;
+ const q=document.createElement('button');q.type='button';q.className='ai-history-question';q.setAttribute('aria-controls',answerId);
+ const a=document.createElement('div');a.id=answerId;a.className='ai-history-answer';a.textContent='ИИ: '+entry.answer;
+ const collapsed=collapsedAIAnswers.has(key);a.hidden=collapsed;
+ q.setAttribute('aria-expanded',String(!collapsed));q.textContent=(collapsed?'＋ ':'－ ')+'Вы: '+entry.question;
+ q.addEventListener('click',()=>{const hide=!a.hidden;a.hidden=hide;q.setAttribute('aria-expanded',String(!hide));q.textContent=(hide?'＋ ':'－ ')+'Вы: '+entry.question;if(hide)collapsedAIAnswers.add(key);else collapsedAIAnswers.delete(key);});
  const d=document.createElement('div');d.className='ai-history-date';const dt=new Date(entry.createdAt);d.textContent=Number.isNaN(dt.getTime())?'':dt.toLocaleString('ru-RU');
  card.append(q,a,d);list.appendChild(card);}
 }
+const collapsedAIAnswers=new Set();
+document.getElementById('ai-history-toggle').addEventListener('click',()=>{
+ aiHistoryCollapsed=!aiHistoryCollapsed;
+ try{localStorage.setItem(AI_HISTORY_COLLAPSED_KEY,JSON.stringify(aiHistoryCollapsed));}catch(e){}
+ renderAIHistory();
+});
 function receiveAIHistory(entries,uid=null){const a=Array.isArray(entries)?entries.filter(x=>x&&typeof x.question==='string'&&typeof x.answer==='string').slice(0,AI_HISTORY_LIMIT):[];aiHistory=a;writeAIHistory(a,uid);renderAIHistory();}
 function mergeAIHistory(localEntries,cloudEntries){
  const byId=new Map();
@@ -1144,6 +1163,7 @@ document.getElementById('ai-run').addEventListener('click', async ()=>{
 });
 
 // ================= init =================
+try{aiHistoryCollapsed=JSON.parse(localStorage.getItem(AI_HISTORY_COLLAPSED_KEY)||'false')===true;}catch(e){}
 aiHistory=readAIHistory();renderAIHistory();
 initializeFirebaseSync();
 let openRouterConnected = false;
