@@ -6,6 +6,7 @@
 <title>ZETI — Ведение</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:ital,wght@0,600;0,700;1,700;1,800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://telegram.org/js/telegram-web-app.js?63"></script>
 <style>
   :root{
     --black:#0B0B0A; --black-2:#161614; --black-3:#1E1E1B;
@@ -191,10 +192,12 @@
       <div class="cloud-account-status" id="cloud-status" role="status" aria-live="polite">Проверяю Google-аккаунт…</div>
       <div class="cloud-account-actions">
         <button class="ghost" id="cloud-sign-in" type="button">Войти через Google</button>
+        <button class="ghost" id="cloud-open-browser" type="button" hidden>Открыть ZETI в браузере</button>
         <button class="ghost" id="cloud-retry" type="button" hidden>Повторить синхронизацию</button>
         <button class="ghost" id="cloud-sign-out" type="button" hidden>Выйти</button>
       </div>
     </div>
+    <div class="cloud-account-status" id="telegram-login-hint" hidden>Встроенное окно Telegram не передаёт вход Google обратно в мини-приложение. Откройте ZETI в браузере и продолжайте пользоваться сайтом там.</div>
     <div class="cloud-account-status">Личные записи синхронизируются между устройствами. OpenRouter подключается отдельно и остаётся на этом устройстве.</div>
   </section>
 
@@ -682,14 +685,19 @@ function mergeTrackerValue(key, localValue, cloudValue){
   }
   return cloudValue === undefined ? localValue : cloudValue;
 }
+function isTelegramMiniApp(){ return Boolean(window.Telegram?.WebApp?.initData) || /Telegram/i.test(navigator.userAgent); }
 function setCloudStatus(message, state=''){
   const status = document.getElementById('cloud-status');
   if(status){ status.textContent = message; status.className = 'cloud-account-status' + (state ? ' ' + state : ''); }
   const signedIn = Boolean(firebaseUser);
-  document.getElementById('cloud-sign-in').hidden = signedIn;
+  const inTelegram = isTelegramMiniApp();
+  document.getElementById('cloud-sign-in').hidden = signedIn || inTelegram;
+  document.getElementById('cloud-open-browser').hidden = signedIn || !inTelegram;
+  document.getElementById('telegram-login-hint').hidden = signedIn || !inTelegram;
   document.getElementById('cloud-sign-out').hidden = !signedIn;
   document.getElementById('cloud-retry').hidden = !signedIn || cloudReady;
 }
+setCloudStatus(document.getElementById('cloud-status').textContent);
 function showCloudError(error){
   const code = error?.code || '';
   if(code === 'permission-denied' || code === 'firestore/permission-denied'){
@@ -697,7 +705,9 @@ function showCloudError(error){
   }else if(code === 'auth/unauthorized-domain'){
     setCloudStatus('Адрес сайта ещё не добавлен в разрешённые домены Firebase.', 'error');
   }else if(code === 'auth/popup-closed-by-user'){
-    setCloudStatus('Окно Google закрыто до завершения входа.', 'error');
+    setCloudStatus(isTelegramMiniApp()
+      ? 'Telegram закрыл отдельное окно Google. Войдите через сайт, открытый в обычном браузере.'
+      : 'Окно Google закрыто до завершения входа.', 'error');
   }else if(code === 'auth/popup-blocked' || code === 'auth/web-storage-unsupported' || code === 'auth/operation-not-supported-in-this-environment'){
     setCloudStatus('Браузер заблокировал окно входа. Откройте сайт напрямую в Chrome или Safari, разрешите всплывающие окна и попробуйте ещё раз.', 'error');
   }else if(code === 'auth/network-request-failed'){
@@ -834,6 +844,10 @@ async function initializeFirebaseSync(){
 }
 document.getElementById('cloud-sign-in').addEventListener('click', async ()=>{
   try{
+    if(isTelegramMiniApp()){
+      setCloudStatus('Google-вход недоступен во встроенном окне Telegram. Откройте ZETI в обычном браузере.','error');
+      return;
+    }
     if(!firebaseAuth) throw new Error('Firebase SDK is not available');
     const provider=new authSdk.GoogleAuthProvider();
     provider.setCustomParameters({prompt:'select_account'});
@@ -842,6 +856,14 @@ document.getElementById('cloud-sign-in').addEventListener('click', async ()=>{
   }catch(error){
     showCloudError(error);
   }
+});
+document.getElementById('cloud-open-browser').addEventListener('click', ()=>{
+  const url = new URL(location.href);
+  url.search = '';
+  url.hash = '';
+  const webApp = window.Telegram?.WebApp;
+  if(webApp?.openLink) webApp.openLink(url.toString());
+  else setCloudStatus('Откройте меню Telegram и нажмите «Открыть в браузере».');
 });
 document.getElementById('cloud-sign-out').addEventListener('click', ()=>{
   if(firebaseAuth) authSdk.signOut(firebaseAuth).catch(showCloudError);
